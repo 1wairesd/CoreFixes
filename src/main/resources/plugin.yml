@@ -1,0 +1,4 @@
+name: CoreFixes
+version: '1.0'
+main: com.wairesd.corefixes.CoreFixes
+api-version: '1.21'
