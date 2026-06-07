@@ -11,22 +11,22 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
-import java.lang.reflect.ParameterizedType;
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * Fixes missing Wind Burst launch velocity when Paper's EntityExplodeEvent is cancelled.
+ * Uses ENTITY_VELOCITY packet.
+ *
+ * Исправляет отсутствие impulse от Wind Burst когда Paper отменяет взрыв.
+ * Использует ENTITY_VELOCITY пакет.
+ */
 public class WindBurstFix implements Listener {
 
-    private static final Enchantment WIND_BURST = Enchantment.getByKey(NamespacedKey.minecraft("wind_burst"));
+    private static final Enchantment WIND_BURST =
+            Enchantment.getByKey(NamespacedKey.minecraft("wind_burst"));
 
     private final JavaPlugin plugin;
-    private final AtomicInteger teleportId = new AtomicInteger(1000);
     private Constructor<?> vec3Ctor;
-    private Constructor<?> pmrCtor;
-    private Constructor<?> posPacketCtor;
-    private Object[] allRelatives;
+    private Constructor<?> motionPacketCtor;
     private Class<?> packetInterface;
 
     public WindBurstFix(JavaPlugin plugin) {
@@ -45,57 +45,49 @@ public class WindBurstFix implements Listener {
     }
 
     private void initReflection() throws Exception {
-        Class<?> vec3Class = Class.forName("net.minecraft.world.phys.Vec3");
-        vec3Ctor = vec3Class.getConstructor(double.class, double.class, double.class);
         packetInterface = Class.forName("net.minecraft.network.protocol.Packet");
 
-        Class<?> posPacketClass = Class.forName("net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket");
+        Class<?> vec3Class = Class.forName("net.minecraft.world.phys.Vec3");
+        vec3Ctor = vec3Class.getConstructor(double.class, double.class, double.class);
 
-        Class<?> pmrClass = Arrays.stream(posPacketClass.getDeclaredFields())
-            .filter(f -> f.getType().getSimpleName().equals("PositionMoveRotation"))
-            .findFirst().orElseThrow().getType();
-        pmrCtor = pmrClass.getConstructor(vec3Class, vec3Class, float.class, float.class);
-
-        Class<?> relClass = (Class<?>) ((ParameterizedType) Arrays.stream(posPacketClass.getDeclaredFields())
-            .filter(f -> f.getName().equals("relatives"))
-            .findFirst().orElseThrow().getGenericType()).getActualTypeArguments()[0];
-        allRelatives = relClass.getEnumConstants();
-
-        posPacketCtor = posPacketClass.getDeclaredConstructor(int.class, pmrClass, Set.class);
-        posPacketCtor.setAccessible(true);
+        Class<?> motionClass = Class.forName(
+                "net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket");
+        motionPacketCtor = motionClass.getDeclaredConstructor(int.class, vec3Class);
+        motionPacketCtor.setAccessible(true);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onHit(EntityDamageByEntityEvent event) {
         if (!(event.getDamager() instanceof Player player)) return;
         if (player.getInventory().getItemInMainHand().getType() != org.bukkit.Material.MACE) return;
-        if (WIND_BURST == null || player.getInventory().getItemInMainHand().getEnchantmentLevel(WIND_BURST) <= 0) return;
-        if (player.getFallDistance() <= 0) return;
+        if (WIND_BURST == null
+                || player.getInventory().getItemInMainHand().getEnchantmentLevel(WIND_BURST) <= 0) return;
+        if (player.getFallDistance() <= 1.5f) return;
 
         plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-            var vel = player.getVelocity();
+            if (!player.isOnline()) return;
+            org.bukkit.util.Vector vel = player.getVelocity();
             if (vel.getY() < 1.0) return;
-            sendPositionPacket(player, vel.getX(), vel.getY(), vel.getZ());
+            sendVelocityPacket(player, vel.getX(), vel.getY(), vel.getZ());
         }, 1L);
     }
 
-    private void sendPositionPacket(Player player, double vx, double vy, double vz) {
+    private void sendVelocityPacket(Player player, double vx, double vy, double vz) {
         try {
-            Object zero = vec3Ctor.newInstance(0.0, 0.0, 0.0);
-            Object pmr = pmrCtor.newInstance(zero, vec3Ctor.newInstance(vx, vy, vz), 0.0f, 0.0f);
-            Set<Object> relatives = new HashSet<>(Arrays.asList(allRelatives));
-            Object packet = posPacketCtor.newInstance(teleportId.incrementAndGet(), pmr, relatives);
-
             Object nmsPlayer = player.getClass().getMethod("getHandle").invoke(player);
+            Object vel = vec3Ctor.newInstance(vx, vy, vz);
+            Object packet = motionPacketCtor.newInstance(player.getEntityId(), vel);
+
             Object connection = findConnection(nmsPlayer);
             connection.getClass().getMethod("send", packetInterface).invoke(connection, packet);
 
-            player.getWorld().spawnParticle(org.bukkit.Particle.GUST_EMITTER_SMALL,
-                player.getLocation().add(0, 0.5, 0), 2, 0.8, 0.8, 0.8, 0);
+            player.getWorld().spawnParticle(
+                    org.bukkit.Particle.GUST_EMITTER_SMALL,
+                    player.getLocation().add(0, 0.5, 0), 2, 0.8, 0.8, 0.8, 0);
             player.getWorld().playSound(player.getLocation(),
-                org.bukkit.Sound.ENTITY_WIND_CHARGE_WIND_BURST, 1.0f, 1.0f);
+                    org.bukkit.Sound.ENTITY_WIND_CHARGE_WIND_BURST, 1.0f, 1.0f);
         } catch (Exception e) {
-            plugin.getLogger().warning("[WindBurstFix] sendPositionPacket failed: " + e);
+            plugin.getLogger().warning("[WindBurstFix] sendVelocityPacket failed: " + e);
         }
     }
 
@@ -108,6 +100,6 @@ public class WindBurstFix implements Listener {
                     return val;
             }
         }
-        throw new RuntimeException("Connection not found");
+        throw new RuntimeException("Connection not found for " + nmsPlayer);
     }
 }
